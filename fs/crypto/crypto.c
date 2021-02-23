@@ -163,7 +163,6 @@ int fscrypt_do_page_crypto(const struct inode *inode, fscrypt_direction_t rw,
 		return -EINVAL;
 	if (WARN_ON_ONCE(len % FS_CRYPTO_BLOCK_SIZE != 0))
 		return -EINVAL;
-	BUG_ON(fscrypt_is_hw_encrypt(inode));
 
 	fscrypt_generate_iv(&iv, lblk_num, ci);
 
@@ -324,41 +323,38 @@ EXPORT_SYMBOL(fscrypt_decrypt_page);
 static int fscrypt_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	struct dentry *dir;
-	int err;
-	int valid;
-
-	/*
-	 * Plaintext names are always valid, since fscrypt doesn't support
-	 * reverting to ciphertext names without evicting the directory's inode
-	 * -- which implies eviction of the dentries in the directory.
-	 */
-	if (!(dentry->d_flags & DCACHE_ENCRYPTED_NAME))
-		return 1;
-
-	/*
-	 * Ciphertext name; valid if the directory's key is still unavailable.
-	 *
-	 * Although fscrypt forbids rename() on ciphertext names, we still must
-	 * use dget_parent() here rather than use ->d_parent directly.  That's
-	 * because a corrupted fs image may contain directory hard links, which
-	 * the VFS handles by moving the directory's dentry tree in the dcache
-	 * each time ->lookup() finds the directory and it already has a dentry
-	 * elsewhere.  Thus ->d_parent can be changing, and we must safely grab
-	 * a reference to some ->d_parent to prevent it from being freed.
-	 */
+	int dir_has_key, cached_with_key;
 
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
 	dir = dget_parent(dentry);
-	err = fscrypt_get_encryption_info(d_inode(dir));
-	valid = !fscrypt_has_encryption_key(d_inode(dir));
+	if (!IS_ENCRYPTED(d_inode(dir))) {
+		dput(dir);
+		return 0;
+	}
+
+	spin_lock(&dentry->d_lock);
+	cached_with_key = dentry->d_flags & DCACHE_ENCRYPTED_WITH_KEY;
+	spin_unlock(&dentry->d_lock);
+	dir_has_key = (d_inode(dir)->i_crypt_info != NULL);
 	dput(dir);
 
-	if (err < 0)
-		return err;
-
-	return valid;
+	/*
+	 * If the dentry was cached without the key, and it is a
+	 * negative dentry, it might be a valid name.  We can't check
+	 * if the key has since been made available due to locking
+	 * reasons, so we fail the validation so ext4_lookup() can do
+	 * this check.
+	 *
+	 * We also fail the validation if the dentry was created with
+	 * the key present, but we no longer have the key, or vice versa.
+	 */
+	if ((!cached_with_key && d_is_negative(dentry)) ||
+			(!cached_with_key && dir_has_key) ||
+			(cached_with_key && !dir_has_key))
+		return 0;
+	return 1;
 }
 
 const struct dentry_operations fscrypt_d_ops = {

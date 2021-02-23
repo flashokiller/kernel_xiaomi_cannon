@@ -93,28 +93,6 @@ static inline int fscrypt_inherit_context(struct inode *parent,
 	return -EOPNOTSUPP;
 }
 
-static inline int fscrypt_set_bio_ctx(struct inode *inode,
-	struct bio *bio)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline int fscrypt_key_payload(struct bio_crypt_ctx *ctx,
-	const unsigned char **key)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline int fscrypt_is_hw_encrypt(const struct inode *inode)
-{
-	return 0;
-}
-
-static inline int fscrypt_is_sw_encrypt(const struct inode *inode)
-{
-	return 0;
-}
-
 /* keyinfo.c */
 static inline int fscrypt_get_encryption_info(struct inode *inode)
 {
@@ -126,11 +104,6 @@ static inline void fscrypt_put_encryption_info(struct inode *inode)
 	return;
 }
 
-static inline void *fscrypt_crypt_info_act(void *ci, int act)
-{
-	return NULL;
-}
-
  /* fname.c */
 static inline int fscrypt_setup_filename(struct inode *dir,
 					 const struct qstr *iname,
@@ -139,7 +112,7 @@ static inline int fscrypt_setup_filename(struct inode *dir,
 	if (IS_ENCRYPTED(dir))
 		return -EOPNOTSUPP;
 
-	memset(fname, 0, sizeof(*fname));
+	memset(fname, 0, sizeof(struct fscrypt_name));
 	fname->usr_fname = iname;
 	fname->disk_name.name = (unsigned char *)iname->name;
 	fname->disk_name.len = iname->len;
@@ -210,8 +183,8 @@ static inline int fscrypt_file_open(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static inline int __fscrypt_prepare_link(struct inode *inode, struct inode *dir,
-					 struct dentry *dentry)
+static inline int __fscrypt_prepare_link(struct inode *inode,
+					 struct inode *dir)
 {
 	return -EOPNOTSUPP;
 }
@@ -226,8 +199,7 @@ static inline int __fscrypt_prepare_rename(struct inode *old_dir,
 }
 
 static inline int __fscrypt_prepare_lookup(struct inode *dir,
-					   struct dentry *dentry,
-					   struct fscrypt_name *fname)
+					   struct dentry *dentry)
 {
 	return -EOPNOTSUPP;
 }

@@ -81,16 +81,9 @@ extern int fscrypt_ioctl_get_policy(struct file *, void __user *);
 extern int fscrypt_has_permitted_context(struct inode *, struct inode *);
 extern int fscrypt_inherit_context(struct inode *, struct inode *,
 					void *, bool);
-extern int fscrypt_set_bio_ctx(struct inode *inode, struct bio *bio);
-extern int fscrypt_key_payload(struct bio_crypt_ctx *ctx,
-				const unsigned char **key);
-extern int fscrypt_is_hw_encrypt(const struct inode *inode);
-extern int fscrypt_is_sw_encrypt(const struct inode *inode);
-
 /* keyinfo.c */
 extern int fscrypt_get_encryption_info(struct inode *);
 extern void fscrypt_put_encryption_info(struct inode *);
-extern void *fscrypt_crypt_info_act(void *ci, int act);
 
 /* fname.c */
 extern int fscrypt_setup_filename(struct inode *, const struct qstr *,
@@ -191,15 +184,13 @@ extern int fscrypt_zeroout_range(const struct inode *, pgoff_t, sector_t,
 
 /* hooks.c */
 extern int fscrypt_file_open(struct inode *inode, struct file *filp);
-extern int __fscrypt_prepare_link(struct inode *inode, struct inode *dir,
-				  struct dentry *dentry);
+extern int __fscrypt_prepare_link(struct inode *inode, struct inode *dir);
 extern int __fscrypt_prepare_rename(struct inode *old_dir,
 				    struct dentry *old_dentry,
 				    struct inode *new_dir,
 				    struct dentry *new_dentry,
 				    unsigned int flags);
-extern int __fscrypt_prepare_lookup(struct inode *dir, struct dentry *dentry,
-				    struct fscrypt_name *fname);
+extern int __fscrypt_prepare_lookup(struct inode *dir, struct dentry *dentry);
 extern int __fscrypt_prepare_symlink(struct inode *dir, unsigned int len,
 				     unsigned int max_len,
 				     struct fscrypt_str *disk_link);
