@@ -2,7 +2,6 @@
  *  linux/fs/ext4/super.c
  *
  * Copyright (C) 1992, 1993, 1994, 1995
- * Copyright (C) 2020 XiaoMi, Inc.
  * Remy Card (card@masi.ibp.fr)
  * Laboratoire MASI - Institut Blaise Pascal
  * Universite Pierre et Marie Curie (Paris VI)
@@ -40,7 +39,6 @@
 #include <linux/crc16.h>
 #include <linux/dax.h>
 #include <linux/cleancache.h>
-#include <linux/hie.h>
 #include <linux/uaccess.h>
 
 #include <linux/kthread.h>
@@ -1388,7 +1386,6 @@ enum {
 	Opt_dioread_nolock, Opt_dioread_lock,
 	Opt_discard, Opt_nodiscard, Opt_init_itable, Opt_noinit_itable,
 	Opt_max_dir_size_kb, Opt_nojournal_checksum, Opt_nombcache,
-	Opt_async_fsync, Opt_noasync_fsync,
 };
 
 static const match_table_t tokens = {
@@ -1463,7 +1460,6 @@ static const match_table_t tokens = {
 	{Opt_auto_da_alloc, "auto_da_alloc"},
 	{Opt_noauto_da_alloc, "noauto_da_alloc"},
 	{Opt_dioread_nolock, "dioread_nolock"},
-	{Opt_dioread_lock, "nodioread_nolock"},
 	{Opt_dioread_lock, "dioread_lock"},
 	{Opt_discard, "discard"},
 	{Opt_nodiscard, "nodiscard"},
@@ -1479,8 +1475,6 @@ static const match_table_t tokens = {
 	{Opt_removed, "reservation"},	/* mount option from ext2/3 */
 	{Opt_removed, "noreservation"}, /* mount option from ext2/3 */
 	{Opt_removed, "journal=%u"},	/* mount option from ext2/3 */
-	{Opt_async_fsync, "async_fsync"},
-	{Opt_noasync_fsync, "noasync_fsync"},
 	{Opt_err, NULL},
 };
 
@@ -1507,7 +1501,7 @@ static ext4_fsblk_t get_sb_block(void **data)
 	return sb_block;
 }
 
-#define DEFAULT_JOURNAL_IOPRIO (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 4))
+#define DEFAULT_JOURNAL_IOPRIO (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 3))
 static const char deprecated_msg[] =
 	"Mount option \"%s\" will be removed by %s\n"
 	"Contact linux-ext4@vger.kernel.org if you think we should keep it.\n";
@@ -1684,8 +1678,6 @@ static const struct mount_opts {
 	{Opt_max_dir_size_kb, 0, MOPT_GTE0},
 	{Opt_test_dummy_encryption, 0, MOPT_GTE0},
 	{Opt_nombcache, EXT4_MOUNT_NO_MBCACHE, MOPT_SET},
-	{Opt_async_fsync, EXT4_MOUNT_ASYNC_FSYNC, MOPT_SET},
-	{Opt_noasync_fsync, EXT4_MOUNT_ASYNC_FSYNC, MOPT_CLEAR},
 	{Opt_err, 0, 0}
 };
 
@@ -1999,6 +1991,16 @@ static int parse_options(char *options, struct super_block *sb,
 		}
 	}
 #endif
+	if (test_opt(sb, DIOREAD_NOLOCK)) {
+		int blocksize =
+			BLOCK_SIZE << le32_to_cpu(sbi->s_es->s_log_block_size);
+
+		if (blocksize < PAGE_SIZE) {
+			ext4_msg(sb, KERN_ERR, "can't mount with "
+				 "dioread_nolock if block size != PAGE_SIZE");
+			return 0;
+		}
+	}
 	return 1;
 }
 
@@ -3633,7 +3635,6 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 		set_opt(sb, NO_UID32);
 	/* xattr user namespace & acls are now defaulted on */
 	set_opt(sb, XATTR_USER);
-	set_opt(sb, DIOREAD_NOLOCK);
 #ifdef CONFIG_EXT4_FS_POSIX_ACL
 	set_opt(sb, POSIX_ACL);
 #endif
@@ -3658,9 +3659,6 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	set_opt(sb, BLOCK_VALIDITY);
 	if (def_mount_opts & EXT4_DEFM_DISCARD)
 		set_opt(sb, DISCARD);
-
-	/* enable async_fsync by default */
-	set_opt(sb, ASYNC_FSYNC);
 
 	sbi->s_resuid = make_kuid(&init_user_ns, le16_to_cpu(es->s_def_resuid));
 	sbi->s_resgid = make_kgid(&init_user_ns, le16_to_cpu(es->s_def_resgid));
@@ -3705,8 +3703,9 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 		goto failed_mount;
 
 	if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA) {
-		printk_once(KERN_WARNING "EXT4-fs: Warning: mounting with data=journal disables delayed allocation, dioread_nolock, and O_DIRECT support!\n");
-		clear_opt(sb, DIOREAD_NOLOCK);
+		printk_once(KERN_WARNING "EXT4-fs: Warning: mounting "
+			    "with data=journal disables delayed "
+			    "allocation and O_DIRECT support!\n");
 		if (test_opt2(sb, EXPLICIT_DELALLOC)) {
 			ext4_msg(sb, KERN_ERR, "can't mount with "
 				 "both data=journal and delalloc");
@@ -4863,10 +4862,7 @@ static int ext4_commit_super(struct super_block *sb, int sync)
 	mark_buffer_dirty(sbh);
 	if (sync) {
 		unlock_buffer(sbh);
-		if (EXT4_SB(sb)->disable_barrier)
-			error = __sync_dirty_buffer(sbh, REQ_SYNC);
-		else
-			error = __sync_dirty_buffer(sbh,
+		error = __sync_dirty_buffer(sbh,
 			REQ_SYNC | (test_opt(sb, BARRIER) ? REQ_FUA : 0));
 		if (error)
 			return error;
@@ -4998,8 +4994,6 @@ static int ext4_sync_fs(struct super_block *sb, int wait)
 		}
 	} else if (wait && test_opt(sb, BARRIER))
 		needs_barrier = true;
-	if (sbi->disable_barrier)
-		needs_barrier = false;
 	if (needs_barrier) {
 		int err;
 		err = blkdev_issue_flush(sb->s_bdev, GFP_KERNEL, NULL);
@@ -5924,44 +5918,6 @@ static struct file_system_type ext4_fs_type = {
 };
 MODULE_ALIAS_FS("ext4");
 
-#ifdef CONFIG_EXT4_ENCRYPTION
-int ext4_set_bio_ctx(struct inode *inode,
-	struct bio *bio)
-{
-	return fscrypt_set_bio_ctx(inode, bio);
-}
-
-static int __ext4_set_bio_ctx(struct inode *inode,
-	struct bio *bio)
-{
-	if (inode->i_sb->s_magic != EXT4_SUPER_MAGIC)
-		return -EINVAL;
-
-	return fscrypt_set_bio_ctx(inode, bio);
-}
-
-static int __ext4_key_payload(struct bio_crypt_ctx *ctx,
-	const unsigned char **key)
-{
-	if (ctx->bc_sb->s_magic != EXT4_SUPER_MAGIC)
-		return -EINVAL;
-
-	return fscrypt_key_payload(ctx, key);
-}
-
-struct hie_fs ext4_hie = {
-	.name = "ext4",
-	.key_payload = __ext4_key_payload,
-	.set_bio_context = __ext4_set_bio_ctx,
-	.priv = NULL,
-};
-#else
-int ext4_set_bio_ctx(struct inode *inode, struct bio *bio)
-{
-	return 0;
-}
-#endif
-
 /* Shared across all ext4 file systems */
 wait_queue_head_t ext4__ioend_wq[EXT4_WQ_HASH_SZ];
 
@@ -6006,10 +5962,6 @@ static int __init ext4_init_fs(void)
 	err = register_filesystem(&ext4_fs_type);
 	if (err)
 		goto out;
-
-#ifdef CONFIG_EXT4_ENCRYPTION
-	hie_register_fs(&ext4_hie);
-#endif
 
 	return 0;
 out:

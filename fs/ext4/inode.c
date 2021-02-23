@@ -3,7 +3,6 @@
  *  linux/fs/ext4/inode.c
  *
  * Copyright (C) 1992, 1993, 1994, 1995
- * Copyright (C) 2020 XiaoMi, Inc.
  * Remy Card (card@masi.ibp.fr)
  * Laboratoire MASI - Institut Blaise Pascal
  * Universite Pierre et Marie Curie (Paris VI)
@@ -48,8 +47,6 @@
 
 #include <trace/events/ext4.h>
 #include <trace/events/android_fs.h>
-
-#include <mt-plat/mtk_blocktag.h>
 
 #define MPAGE_DA_EXTENT_TAIL 0x01
 
@@ -1173,7 +1170,6 @@ static int ext4_block_write_begin(struct page *page, loff_t pos, unsigned len,
 	unsigned bbits;
 	struct buffer_head *bh, *head, *wait[2], **wait_bh = wait;
 	bool decrypt = false;
-	bool hwcrypt = fscrypt_is_hw_encrypt(inode);
 
 	BUG_ON(!PageLocked(page));
 	BUG_ON(from > PAGE_SIZE);
@@ -1225,13 +1221,6 @@ static int ext4_block_write_begin(struct page *page, loff_t pos, unsigned len,
 		if (!buffer_uptodate(bh) && !buffer_delay(bh) &&
 		    !buffer_unwritten(bh) &&
 		    (block_start < from || block_end > to)) {
-			if (hwcrypt) {
-				ll_rw_block_crypt(inode, REQ_OP_READ,
-					0, 1, &bh);
-				*wait_bh++ = bh;
-				decrypt = false;
-				continue;
-			}
 			ll_rw_block(REQ_OP_READ, 0, 1, &bh);
 			*wait_bh++ = bh;
 			decrypt = ext4_encrypted_inode(inode) &&
@@ -1383,7 +1372,6 @@ retry_journal:
 		return ret;
 	}
 	*pagep = page;
-	mtk_btag_pidlog_set_pid(*pagep);
 	return ret;
 }
 
@@ -2195,7 +2183,6 @@ static int ext4_writepage(struct page *page,
 		return __ext4_journalled_writepage(page, len);
 
 	ext4_io_submit_init(&io_submit, wbc);
-	io_submit.inode = inode;
 	io_submit.io_end = ext4_init_io_end(inode, GFP_NOFS);
 	if (!io_submit.io_end) {
 		redirty_page_for_writepage(wbc, page);
@@ -2354,79 +2341,6 @@ static int mpage_process_page_bufs(struct mpage_da_data *mpd,
 }
 
 /*
- * mpage_process_page - update page buffers corresponding to changed extent and
- *		       may submit fully mapped page for IO
- *
- * @mpd		- description of extent to map, on return next extent to map
- * @m_lblk	- logical block mapping.
- * @m_pblk	- corresponding physical mapping.
- * @map_bh	- determines on return whether this page requires any further
- *		  mapping or not.
- * Scan given page buffers corresponding to changed extent and update buffer
- * state according to new extent state.
- * We map delalloc buffers to their physical location, clear unwritten bits.
- * If the given page is not fully mapped, we update @map to the next extent in
- * the given page that needs mapping & return @map_bh as true.
- */
-static int mpage_process_page(struct mpage_da_data *mpd, struct page *page,
-			      ext4_lblk_t *m_lblk, ext4_fsblk_t *m_pblk,
-			      bool *map_bh)
-{
-	struct buffer_head *head, *bh;
-	ext4_io_end_t *io_end = mpd->io_submit.io_end;
-	ext4_lblk_t lblk = *m_lblk;
-	ext4_fsblk_t pblock = *m_pblk;
-	int err = 0;
-	int blkbits = mpd->inode->i_blkbits;
-	ssize_t io_end_size = 0;
-	struct ext4_io_end_vec *io_end_vec = ext4_last_io_end_vec(io_end);
-
-	bh = head = page_buffers(page);
-	do {
-		if (lblk < mpd->map.m_lblk)
-			continue;
-		if (lblk >= mpd->map.m_lblk + mpd->map.m_len) {
-			/*
-			 * Buffer after end of mapped extent.
-			 * Find next buffer in the page to map.
-			 */
-			mpd->map.m_len = 0;
-			mpd->map.m_flags = 0;
-			io_end_vec->size += io_end_size;
-			io_end_size = 0;
-
-			err = mpage_process_page_bufs(mpd, head, bh, lblk);
-			if (err > 0)
-				err = 0;
-			if (!err && mpd->map.m_len && mpd->map.m_lblk > lblk) {
-				io_end_vec = ext4_alloc_io_end_vec(io_end);
-				if (IS_ERR(io_end_vec)) {
-					err = PTR_ERR(io_end_vec);
-					goto out;
-				}
-				io_end_vec->offset = mpd->map.m_lblk << blkbits;
-			}
-			*map_bh = true;
-			goto out;
-		}
-		if (buffer_delay(bh)) {
-			clear_buffer_delay(bh);
-			bh->b_blocknr = pblock++;
-		}
-		clear_buffer_unwritten(bh);
-		io_end_size += (1 << blkbits);
-	} while (lblk++, (bh = bh->b_this_page) != head);
-
-	io_end_vec->size += io_end_size;
-	io_end_size = 0;
-	*map_bh = false;
-out:
-	*m_lblk = lblk;
-	*m_pblk = pblock;
-	return err;
-}
-
-/*
  * mpage_map_buffers - update buffers corresponding to changed extent and
  *		       submit fully mapped pages for IO
  *
@@ -2445,12 +2359,12 @@ static int mpage_map_and_submit_buffers(struct mpage_da_data *mpd)
 	struct pagevec pvec;
 	int nr_pages, i;
 	struct inode *inode = mpd->inode;
+	struct buffer_head *head, *bh;
 	int bpp_bits = PAGE_SHIFT - inode->i_blkbits;
 	pgoff_t start, end;
 	ext4_lblk_t lblk;
-	ext4_fsblk_t pblock;
+	sector_t pblock;
 	int err;
-	bool map_bh = false;
 
 	start = mpd->map.m_lblk >> bpp_bits;
 	end = (mpd->map.m_lblk + mpd->map.m_len - 1) >> bpp_bits;
@@ -2466,19 +2380,50 @@ static int mpage_map_and_submit_buffers(struct mpage_da_data *mpd)
 		for (i = 0; i < nr_pages; i++) {
 			struct page *page = pvec.pages[i];
 
-			err = mpage_process_page(mpd, page, &lblk, &pblock,
-						 &map_bh);
+			bh = head = page_buffers(page);
+			do {
+				if (lblk < mpd->map.m_lblk)
+					continue;
+				if (lblk >= mpd->map.m_lblk + mpd->map.m_len) {
+					/*
+					 * Buffer after end of mapped extent.
+					 * Find next buffer in the page to map.
+					 */
+					mpd->map.m_len = 0;
+					mpd->map.m_flags = 0;
+					/*
+					 * FIXME: If dioread_nolock supports
+					 * blocksize < pagesize, we need to make
+					 * sure we add size mapped so far to
+					 * io_end->size as the following call
+					 * can submit the page for IO.
+					 */
+					err = mpage_process_page_bufs(mpd, head,
+								      bh, lblk);
+					pagevec_release(&pvec);
+					if (err > 0)
+						err = 0;
+					return err;
+				}
+				if (buffer_delay(bh)) {
+					clear_buffer_delay(bh);
+					bh->b_blocknr = pblock++;
+				}
+				clear_buffer_unwritten(bh);
+			} while (lblk++, (bh = bh->b_this_page) != head);
+
 			/*
-			 * If map_bh is true, means page may require further bh
-			 * mapping, or maybe the page was submitted for IO.
-			 * So we return to call further extent mapping.
+			 * FIXME: This is going to break if dioread_nolock
+			 * supports blocksize < pagesize as we will try to
+			 * convert potentially unmapped parts of inode.
 			 */
-			if (err < 0 || map_bh == true)
-				goto out;
+			mpd->io_submit.io_end->size += PAGE_SIZE;
 			/* Page fully mapped - let IO run! */
 			err = mpage_submit_page(mpd, page);
-			if (err < 0)
-				goto out;
+			if (err < 0) {
+				pagevec_release(&pvec);
+				return err;
+			}
 		}
 		pagevec_release(&pvec);
 	}
@@ -2486,9 +2431,6 @@ static int mpage_map_and_submit_buffers(struct mpage_da_data *mpd)
 	mpd->map.m_len = 0;
 	mpd->map.m_flags = 0;
 	return 0;
-out:
-	pagevec_release(&pvec);
-	return err;
 }
 
 static int mpage_map_one_extent(handle_t *handle, struct mpage_da_data *mpd)
@@ -2572,14 +2514,9 @@ static int mpage_map_and_submit_extent(handle_t *handle,
 	int err;
 	loff_t disksize;
 	int progress = 0;
-	ext4_io_end_t *io_end = mpd->io_submit.io_end;
-	struct ext4_io_end_vec *io_end_vec;
 
-	io_end_vec = ext4_alloc_io_end_vec(io_end);
-	if (IS_ERR(io_end_vec))
-		return PTR_ERR(io_end_vec);
-
-	io_end_vec->offset = ((loff_t)map->m_lblk) << inode->i_blkbits;
+	mpd->io_submit.io_end->offset =
+				((loff_t)map->m_lblk) << inode->i_blkbits;
 	do {
 		err = mpage_map_one_extent(handle, mpd);
 		if (err < 0) {
@@ -2887,7 +2824,6 @@ static int ext4_writepages(struct address_space *mapping,
 	mpd.inode = inode;
 	mpd.wbc = wbc;
 	ext4_io_submit_init(&mpd.io_submit, wbc);
-	mpd.io_submit.inode = inode;
 retry:
 	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
 		tag_pages_for_writeback(mapping, mpd.first_page, mpd.last_page);
@@ -3653,7 +3589,6 @@ static int ext4_end_io_dio(struct kiocb *iocb, loff_t offset,
 			    ssize_t size, void *private)
 {
         ext4_io_end_t *io_end = private;
-	struct ext4_io_end_vec *io_end_vec;
 
 	/* if not async direct IO just return */
 	if (!io_end)
@@ -3671,11 +3606,8 @@ static int ext4_end_io_dio(struct kiocb *iocb, loff_t offset,
 		ext4_clear_io_unwritten_flag(io_end);
 		size = 0;
 	}
-	io_end_vec = ext4_alloc_io_end_vec(io_end);
-	if (IS_ERR(io_end_vec))
-		return PTR_ERR(io_end_vec);
-	io_end_vec->offset = offset;
-	io_end_vec->size = size;
+	io_end->offset = offset;
+	io_end->size = size;
 	ext4_put_io_end(io_end);
 
 	return 0;
@@ -3782,13 +3714,6 @@ static ssize_t ext4_direct_IO_write(struct kiocb *iocb, struct iov_iter *iter)
 		get_block_func = ext4_dio_get_block_unwritten_async;
 		dio_flags = DIO_LOCKING;
 	}
-#ifdef CONFIG_EXT4_FS_ENCRYPTION
-#if 0
-	BUG_ON(ext4_encrypted_inode(inode) && S_ISREG(inode->i_mode));
-#else
-	WARN_ON(fscrypt_is_sw_encrypt(inode));
-#endif
-#endif
 	ret = __blockdev_direct_IO(iocb, inode, inode->i_sb->s_bdev, iter,
 				   get_block_func, ext4_end_io_dio, NULL,
 				   dio_flags);
@@ -3898,11 +3823,8 @@ static ssize_t ext4_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	int rw = iov_iter_rw(iter);
 
 #ifdef CONFIG_EXT4_FS_ENCRYPTION
-	if (fscrypt_is_hw_encrypt(inode))
-		goto skip_check;
 	if (ext4_encrypted_inode(inode) && S_ISREG(inode->i_mode))
 		return 0;
-skip_check:
 #endif
 
 	/*
@@ -4104,16 +4026,12 @@ static int __ext4_block_zero_page_range(handle_t *handle,
 
 	if (!buffer_uptodate(bh)) {
 		err = -EIO;
-		if (fscrypt_is_hw_encrypt(inode))
-			ll_rw_block_crypt(inode, REQ_OP_READ, 0, 1, &bh);
-		else
-			ll_rw_block(REQ_OP_READ, 0, 1, &bh);
+		ll_rw_block(REQ_OP_READ, 0, 1, &bh);
 		wait_on_buffer(bh);
 		/* Uhhuh. Read error. Complain and punt. */
 		if (!buffer_uptodate(bh))
 			goto unlock;
 		if (S_ISREG(inode->i_mode) &&
-		    fscrypt_is_sw_encrypt(inode) &&
 		    ext4_encrypted_inode(inode)) {
 			/* We expect the key to be set. */
 			BUG_ON(!fscrypt_has_encryption_key(inode));
