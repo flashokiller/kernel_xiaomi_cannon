@@ -76,7 +76,7 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	set_inode_flag(inode, FI_NEW_INODE);
 
 	/* If the directory encrypted, then we should encrypt the inode. */
-	if ((IS_ENCRYPTED(dir) || DUMMY_ENCRYPTION_ENABLED(sbi)) &&
+	if ((f2fs_encrypted_inode(dir) || DUMMY_ENCRYPTION_ENABLED(sbi)) &&
 				f2fs_may_encrypt(inode))
 		f2fs_set_encrypted_inode(inode);
 
@@ -436,23 +436,19 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 	nid_t ino = -1;
 	int err = 0;
 	unsigned int root_ino = F2FS_ROOT_INO(F2FS_I_SB(dir));
-	struct fscrypt_name fname;
 
 	trace_f2fs_lookup_start(dir, dentry, flags);
+
+	err = fscrypt_prepare_lookup(dir, dentry, flags);
+	if (err)
+		goto out;
 
 	if (dentry->d_name.len > F2FS_NAME_LEN) {
 		err = -ENAMETOOLONG;
 		goto out;
 	}
 
-	err = fscrypt_prepare_lookup(dir, dentry, &fname);
-	if (err == -ENOENT)
-		goto out_splice;
-	if (err)
-		goto out;
-	de = __f2fs_find_entry(dir, &fname, &page);
-	fscrypt_free_filename(&fname);
-
+	de = f2fs_find_entry(dir, &dentry->d_name, &page);
 	if (!de) {
 		if (IS_ERR(page)) {
 			err = PTR_ERR(page);
@@ -481,7 +477,7 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 		if (err)
 			goto out_iput;
 	}
-	if (IS_ENCRYPTED(dir) &&
+	if (f2fs_encrypted_inode(dir) &&
 	    (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode)) &&
 	    !fscrypt_has_permitted_context(dir, inode)) {
 		f2fs_msg(inode->i_sb, KERN_WARNING,
@@ -492,7 +488,8 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 	}
 out_splice:
 	new = d_splice_alias(inode, dentry);
-	err = PTR_ERR_OR_ZERO(new);
+	if (IS_ERR(new))
+		err = PTR_ERR(new);
 	trace_f2fs_lookup_end(dir, dentry, ino, err);
 	return new;
 out_iput:
@@ -510,8 +507,7 @@ static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
 	struct page *page;
 	int err = -ENOENT;
 
-	/* Comment out temporarily for since this has use-after-free issue */
-	/* trace_f2fs_unlink_enter(dir, dentry); */
+	trace_f2fs_unlink_enter(dir, dentry);
 
 	if (unlikely(f2fs_cp_error(sbi)))
 		return -EIO;
@@ -545,8 +541,7 @@ static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
 fail:
-	/* Comment out temporarily for since this has use-after-free issue */
-	/* trace_f2fs_unlink_exit(inode, err); */
+	trace_f2fs_unlink_exit(inode, err);
 	return err;
 }
 
@@ -809,7 +804,7 @@ static int f2fs_tmpfile(struct inode *dir, struct dentry *dentry, umode_t mode)
 	if (unlikely(f2fs_cp_error(sbi)))
 		return -EIO;
 
-	if (IS_ENCRYPTED(dir) || DUMMY_ENCRYPTION_ENABLED(sbi)) {
+	if (f2fs_encrypted_inode(dir) || DUMMY_ENCRYPTION_ENABLED(sbi)) {
 		int err = fscrypt_get_encryption_info(dir);
 		if (err)
 			return err;

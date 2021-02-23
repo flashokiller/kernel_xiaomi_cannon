@@ -44,7 +44,7 @@ void f2fs_set_inode_flags(struct inode *inode)
 		new_fl |= S_NOATIME;
 	if (flags & F2FS_DIRSYNC_FL)
 		new_fl |= S_DIRSYNC;
-	if (file_is_encrypt(inode))
+	if (f2fs_encrypted_inode(inode))
 		new_fl |= S_ENCRYPTED;
 	inode_set_flags(inode, new_fl,
 			S_SYNC|S_APPEND|S_IMMUTABLE|S_NOATIME|S_DIRSYNC|
@@ -74,7 +74,7 @@ static int __written_first_block(struct f2fs_sb_info *sbi,
 	if (!__is_valid_data_blkaddr(addr))
 		return 1;
 	if (!f2fs_is_valid_blkaddr(sbi, addr, DATA_GENERIC))
-		return -EFSCORRUPTED;
+		return -EFAULT;
 	return 0;
 }
 
@@ -373,7 +373,7 @@ static int do_read_inode(struct inode *inode)
 
 	if (!sanity_check_inode(inode, node_page)) {
 		f2fs_put_page(node_page, 1);
-		return -EFSCORRUPTED;
+		return -EINVAL;
 	}
 
 	/* check data exist */
@@ -468,7 +468,7 @@ make_now:
 		inode->i_mapping->a_ops = &f2fs_dblock_aops;
 		inode_nohighmem(inode);
 	} else if (S_ISLNK(inode->i_mode)) {
-		if (file_is_encrypt(inode))
+		if (f2fs_encrypted_inode(inode))
 			inode->i_op = &f2fs_encrypted_symlink_inode_operations;
 		else
 			inode->i_op = &f2fs_symlink_inode_operations;

@@ -3,7 +3,6 @@
  * fs/f2fs/super.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
- * Copyright (C) 2020 XiaoMi, Inc.
  *             http://www.samsung.com/
  */
 #include <linux/module.h>
@@ -24,7 +23,6 @@
 #include <linux/f2fs_fs.h>
 #include <linux/sysfs.h>
 #include <linux/quota.h>
-#include <linux/hie.h>
 
 #include "f2fs.h"
 #include "node.h"
@@ -1109,7 +1107,6 @@ static void f2fs_put_super(struct super_block *sb)
 	kvfree(sbi->raw_super);
 
 	destroy_device_list(sbi);
-	f2fs_destroy_xattr_caches(sbi);
 	mempool_destroy(sbi->write_io_dummy);
 #ifdef CONFIG_QUOTA
 	for (i = 0; i < MAXQUOTAS; i++)
@@ -2229,77 +2226,6 @@ static const struct fscrypt_operations f2fs_cryptops = {
 	.empty_dir	= f2fs_empty_dir,
 	.max_namelen	= F2FS_NAME_LEN,
 };
-
-int f2fs_set_bio_ctx(struct inode *inode, struct bio *bio)
-{
-	int ret;
-
-	ret = fscrypt_set_bio_ctx(inode, bio);
-
-	if (!ret && bio_encrypted(bio))
-		bio_bcf_set(bio, BC_IV_PAGE_IDX);
-
-	return ret;
-}
-
-int f2fs_set_bio_ctx_fio(struct f2fs_io_info *fio, struct bio *bio)
-{
-	int ret = 0;
-	struct address_space *mapping;
-
-	/* Don't attach bio ctx for sw encrypted pages,
-	 * including moving raw blocks in GC.
-	 */
-	if (fio->encrypted_page)
-		return 0;
-
-	mapping = page_mapping(fio->page);
-
-	if (mapping)
-		ret = f2fs_set_bio_ctx(mapping->host, bio);
-
-	return ret;
-}
-
-static int __f2fs_set_bio_ctx(struct inode *inode,
-	struct bio *bio)
-{
-	if (inode->i_sb->s_magic != F2FS_SUPER_MAGIC)
-		return -EINVAL;
-
-	return f2fs_set_bio_ctx(inode, bio);
-}
-
-static int __f2fs_key_payload(struct bio_crypt_ctx *ctx,
-	const unsigned char **key)
-{
-	if (ctx->bc_sb->s_magic != F2FS_SUPER_MAGIC)
-		return -EINVAL;
-
-	return fscrypt_key_payload(ctx, key);
-}
-
-struct hie_fs f2fs_hie = {
-	.name = "f2fs",
-	.key_payload = __f2fs_key_payload,
-	.set_bio_context = __f2fs_set_bio_ctx,
-	.priv = NULL,
-};
-
-#else
-static const struct fscrypt_operations f2fs_cryptops = {
-	.is_encrypted	= f2fs_encrypted_inode,
-};
-
-int f2fs_set_bio_ctx(struct inode *inode, struct bio *bio)
-{
-	return 0;
-}
-
-int f2fs_set_bio_ctx_fio(struct f2fs_io_info *fio, struct bio *bio)
-{
-	return 0;
-}
 #endif
 
 static struct inode *f2fs_nfs_get_inode(struct super_block *sb,
@@ -2518,11 +2444,11 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		}
 	}
 
-	if (le32_to_cpu(raw_super->magic) != F2FS_SUPER_MAGIC) {
+	if (F2FS_SUPER_MAGIC != le32_to_cpu(raw_super->magic)) {
 		f2fs_msg(sb, KERN_INFO,
 			"Magic Mismatch, valid(0x%x) - read(0x%x)",
 			F2FS_SUPER_MAGIC, le32_to_cpu(raw_super->magic));
-		return -EINVAL;
+		return 1;
 	}
 
 	/* Currently, support only 4KB page cache size */
@@ -2530,7 +2456,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		f2fs_msg(sb, KERN_INFO,
 			"Invalid page_cache_size (%lu), supports only 4KB\n",
 			PAGE_SIZE);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	/* Currently, support only 4KB block size */
@@ -2539,7 +2465,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		f2fs_msg(sb, KERN_INFO,
 			"Invalid blocksize (%u), supports only 4KB\n",
 			blocksize);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	/* check log blocks per segment */
@@ -2547,7 +2473,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		f2fs_msg(sb, KERN_INFO,
 			"Invalid log blocks per segment (%u)\n",
 			le32_to_cpu(raw_super->log_blocks_per_seg));
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	/* Currently, support 512/1024/2048/4096 bytes sector size */
@@ -2557,7 +2483,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 				F2FS_MIN_LOG_SECTOR_SIZE) {
 		f2fs_msg(sb, KERN_INFO, "Invalid log sectorsize (%u)",
 			le32_to_cpu(raw_super->log_sectorsize));
-		return -EFSCORRUPTED;
+		return 1;
 	}
 	if (le32_to_cpu(raw_super->log_sectors_per_block) +
 		le32_to_cpu(raw_super->log_sectorsize) !=
@@ -2566,7 +2492,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 			"Invalid log sectors per block(%u) log sectorsize(%u)",
 			le32_to_cpu(raw_super->log_sectors_per_block),
 			le32_to_cpu(raw_super->log_sectorsize));
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	segment_count = le32_to_cpu(raw_super->segment_count);
@@ -2582,7 +2508,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		f2fs_msg(sb, KERN_INFO,
 			"Invalid segment count (%u)",
 			segment_count);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	if (total_sections > segment_count ||
@@ -2591,28 +2517,28 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 		f2fs_msg(sb, KERN_INFO,
 			"Invalid segment/section count (%u, %u x %u)",
 			segment_count, total_sections, segs_per_sec);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	if ((segment_count / segs_per_sec) < total_sections) {
 		f2fs_msg(sb, KERN_INFO,
 			"Small segment_count (%u < %u * %u)",
 			segment_count, segs_per_sec, total_sections);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	if (segment_count > (le64_to_cpu(raw_super->block_count) >> 9)) {
 		f2fs_msg(sb, KERN_INFO,
 			"Wrong segment_count / block_count (%u > %llu)",
 			segment_count, le64_to_cpu(raw_super->block_count));
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	if (secs_per_zone > total_sections || !secs_per_zone) {
 		f2fs_msg(sb, KERN_INFO,
 			"Wrong secs_per_zone / total_sections (%u, %u)",
 			secs_per_zone, total_sections);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 	if (le32_to_cpu(raw_super->extension_count) > F2FS_MAX_EXTENSION ||
 			raw_super->hot_ext_count > F2FS_MAX_EXTENSION ||
@@ -2623,7 +2549,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 			le32_to_cpu(raw_super->extension_count),
 			raw_super->hot_ext_count,
 			F2FS_MAX_EXTENSION);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	if (le32_to_cpu(raw_super->cp_payload) >
@@ -2632,7 +2558,7 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 			"Insane cp_payload (%u > %u)",
 			le32_to_cpu(raw_super->cp_payload),
 			blocks_per_seg - F2FS_CP_PACKS);
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	/* check reserved ino info */
@@ -2644,12 +2570,12 @@ static int sanity_check_raw_super(struct f2fs_sb_info *sbi,
 			le32_to_cpu(raw_super->node_ino),
 			le32_to_cpu(raw_super->meta_ino),
 			le32_to_cpu(raw_super->root_ino));
-		return -EFSCORRUPTED;
+		return 1;
 	}
 
 	/* check CP/SIT/NAT/SSA/MAIN_AREA area boundary */
 	if (sanity_check_area_boundary(sbi, bh))
-		return -EFSCORRUPTED;
+		return 1;
 
 	return 0;
 }
@@ -2735,11 +2661,11 @@ int f2fs_sanity_check_ckpt(struct f2fs_sb_info *sbi)
 		}
 	}
 	for (i = 0; i < NR_CURSEG_NODE_TYPE; i++) {
-		for (j = 0; j < NR_CURSEG_DATA_TYPE; j++) {
+		for (j = i; j < NR_CURSEG_DATA_TYPE; j++) {
 			if (le32_to_cpu(ckpt->cur_node_segno[i]) ==
 				le32_to_cpu(ckpt->cur_data_segno[j])) {
 				f2fs_msg(sbi->sb, KERN_ERR,
-					"Node segment (%u) and Data segment (%u)"
+					"Data segment (%u) and Data segment (%u)"
 					" has the same segno: %u", i, j,
 					le32_to_cpu(ckpt->cur_node_segno[i]));
 				return 1;
@@ -2943,11 +2869,11 @@ static int read_raw_super_block(struct f2fs_sb_info *sbi,
 		}
 
 		/* sanity checking of raw super */
-		err = sanity_check_raw_super(sbi, bh);
-		if (err) {
+		if (sanity_check_raw_super(sbi, bh)) {
 			f2fs_msg(sb, KERN_ERR,
 				"Can't find valid F2FS filesystem in %dth superblock",
 				block + 1);
+			err = -EINVAL;
 			brelse(bh);
 			continue;
 		}
@@ -3291,17 +3217,12 @@ try_onemore:
 		}
 	}
 
-	/* init per sbi slab cache */
-	err = f2fs_init_xattr_caches(sbi);
-	if (err)
-		goto free_io_dummy;
-
 	/* get an inode for meta space */
 	sbi->meta_inode = f2fs_iget(sb, F2FS_META_INO(sbi));
 	if (IS_ERR(sbi->meta_inode)) {
 		f2fs_msg(sb, KERN_ERR, "Failed to read F2FS meta data inode");
 		err = PTR_ERR(sbi->meta_inode);
-		goto free_xattr_cache;
+		goto free_io_dummy;
 	}
 
 	err = f2fs_get_valid_checkpoint(sbi);
@@ -3549,8 +3470,6 @@ free_meta_inode:
 	make_bad_inode(sbi->meta_inode);
 	iput(sbi->meta_inode);
 	sbi->meta_inode = NULL;
-free_xattr_cache:
-	f2fs_destroy_xattr_caches(sbi);
 free_io_dummy:
 	mempool_destroy(sbi->write_io_dummy);
 free_percpu:
@@ -3678,11 +3597,6 @@ static int __init init_f2fs_fs(void)
 	err = f2fs_init_post_read_processing();
 	if (err)
 		goto free_root_stats;
-
-#ifdef CONFIG_F2FS_FS_ENCRYPTION
-	hie_register_fs(&f2fs_hie);
-#endif
-
 	return 0;
 
 free_root_stats:

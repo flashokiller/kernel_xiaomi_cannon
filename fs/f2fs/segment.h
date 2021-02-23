@@ -229,9 +229,6 @@ struct sit_info {
 	char *sit_bitmap;		/* SIT bitmap pointer */
 #ifdef CONFIG_F2FS_CHECK_FS
 	char *sit_bitmap_mir;		/* SIT bitmap mirror */
-
-	/* bitmap of segments to be ignored by GC in case of errors */
-	unsigned long *invalid_segmap;
 #endif
 	unsigned int bitmap_size;	/* SIT bitmap size */
 
@@ -699,7 +696,7 @@ static inline int check_block_count(struct f2fs_sb_info *sbi,
 				"Mismatch valid blocks %d vs. %d",
 					GET_SIT_VBLOCKS(raw_sit), valid_blocks);
 		set_sbi_flag(sbi, SBI_NEED_FSCK);
-		return -EFSCORRUPTED;
+		return -EINVAL;
 	}
 
 	/* check segment usage, and check boundary of a given segment number */
@@ -709,7 +706,7 @@ static inline int check_block_count(struct f2fs_sb_info *sbi,
 				"Wrong valid blocks %d or segno %u",
 					GET_SIT_VBLOCKS(raw_sit), segno);
 		set_sbi_flag(sbi, SBI_NEED_FSCK);
-		return -EFSCORRUPTED;
+		return -EINVAL;
 	}
 	return 0;
 }
