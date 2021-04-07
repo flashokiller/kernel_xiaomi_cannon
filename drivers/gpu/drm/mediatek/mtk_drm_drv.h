@@ -124,6 +124,7 @@ struct mtk_drm_private {
 	} commit;
 
 	struct drm_atomic_state *suspend_state;
+	bool dma_parms_allocated;
 
 	struct {
 		struct work_struct work;
