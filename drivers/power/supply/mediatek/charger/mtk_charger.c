@@ -1585,7 +1585,7 @@ static void mtk_float_retry_work(struct work_struct *work)
 	pr_info("%s rerun bc12 check for float.\n", __func__);
 }
 
-
+#ifdef MTK_CHARGER_THREADING
 bool reboot_first_flag = true;
 static bool mtk_is_charger_on(struct charger_manager *info)
 {
@@ -1645,11 +1645,14 @@ static bool mtk_is_charger_on(struct charger_manager *info)
 
 	return true;
 }
+#endif
 
+#ifdef MTK_CHARGER_THREADING
 static void charger_update_data(struct charger_manager *info)
 {
 	info->battery_temp = battery_get_bat_temperature();
 }
+#endif
 
 static int mtk_chgstat_notify(struct charger_manager *info)
 {
@@ -1780,6 +1783,7 @@ static void mtk_battery_notify_check(struct charger_manager *info)
 	}
 }
 
+#ifdef MTK_CHARGER_THREADING
 static void check_battery_exist(struct charger_manager *info)
 {
 	unsigned int i = 0;
@@ -1805,7 +1809,9 @@ static void check_battery_exist(struct charger_manager *info)
 		}
 	}
 }
+#endif
 
+#ifdef MTK_CHARGER_THREADING
 static void check_dynamic_mivr(struct charger_manager *info)
 {
 	int vbat = 0;
@@ -1831,6 +1837,7 @@ static void check_dynamic_mivr(struct charger_manager *info)
 		}
 	}
 }
+#endif
 
 static void mtk_chg_get_tchg(struct charger_manager *info)
 {
@@ -1966,6 +1973,7 @@ int mtk_chg_get_ts_temp(void)
 	return charger_manager_get_ts_temp(pinfo);
 }
 
+#ifdef MTK_CHARGER_THREADING
 static void charger_check_status(struct charger_manager *info)
 {
 	bool charging = true;
@@ -2058,7 +2066,9 @@ stop_charging:
 
 	info->can_charging = charging;
 }
+#endif
 
+#ifdef MTK_CHARGER_THREADING
 static void kpoc_power_off_check(struct charger_manager *info)
 {
 	unsigned int boot_mode = get_boot_mode();
@@ -2075,6 +2085,7 @@ static void kpoc_power_off_check(struct charger_manager *info)
 		}
 	}
 }
+#endif
 
 #ifdef CONFIG_PM
 static int charger_pm_event(struct notifier_block *notifier,
