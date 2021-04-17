@@ -2268,6 +2268,63 @@ static void mtk_conn_therm_work(struct work_struct *work)
 	return;
 }
 
+static int charger_routine_thread(void *arg)
+{
+	struct charger_manager *info = arg;
+	unsigned long flags = 0;
+	bool is_charger_on = false;
+	int bat_current = 0, chg_current = 0;
+
+	while (1) {
+		wait_event(info->wait_que,
+			(info->charger_thread_timeout == true));
+
+		mutex_lock(&info->charger_lock);
+		spin_lock_irqsave(&info->slock, flags);
+		if (!info->charger_wakelock.active)
+			__pm_stay_awake(&info->charger_wakelock);
+		spin_unlock_irqrestore(&info->slock, flags);
+
+		info->charger_thread_timeout = false;
+		bat_current = battery_get_bat_current();
+		chg_current = pmic_get_charging_current();
+		chr_err("Vbat=%d,Ibat=%d,I=%d,VChr=%d,T=%d,Soc=%d:%d,CT:%d:%d hv:%d pd:%d:%d\n",
+			battery_get_bat_voltage(), bat_current, chg_current,
+			battery_get_vbus(), battery_get_bat_temperature(),
+			battery_get_soc(), battery_get_uisoc(),
+			mt_get_charger_type(), info->chr_type,
+			info->enable_hv_charging, info->pd_type,
+			info->pd_reset);
+
+		is_charger_on = mtk_is_charger_on(info);
+
+		if (info->charger_thread_polling == true)
+			mtk_charger_start_timer(info);
+
+		charger_update_data(info);
+		check_battery_exist(info);
+		check_dynamic_mivr(info);
+		charger_check_status(info);
+		kpoc_power_off_check(info);
+		if (is_disable_charger() == false) {
+			if (is_charger_on == true) {
+				if (info->do_algorithm)
+					info->do_algorithm(info);
+			}
+		} else
+			chr_debug("disable charging\n");
+
+		spin_lock_irqsave(&info->slock, flags);
+		__pm_relax(&info->charger_wakelock);
+		spin_unlock_irqrestore(&info->slock, flags);
+		chr_debug("%s end , %d\n",
+			__func__, info->charger_thread_timeout);
+		mutex_unlock(&info->charger_lock);
+	}
+
+	return 0;
+}
+
 static int read_range_data_from_node(struct device_node *node,
 		const char *prop_str, struct range_data *ranges,
 		u32 max_threshold, u32 max_value)
@@ -3755,6 +3812,8 @@ static int mtk_charger_probe(struct platform_device *pdev)
 	info->is_input_suspend = false;
 
 	mtk_charger_init_timer(info);
+
+	kthread_run(charger_routine_thread, info, "charger_thread");
 
 	if (info->chg1_dev != NULL && info->do_event != NULL) {
 		info->chg1_nb.notifier_call = info->do_event;
